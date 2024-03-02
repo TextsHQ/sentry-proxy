@@ -1,61 +1,79 @@
+import { getClickhouseClient, insertSentryEventToClickHouse, mapSentryEventToClickHouseEvent } from './clickhouse'
+import {
+  // BadRequestResponse,
+  extractProjectIDFromPathname, InternalServerErrorResponse,
+  safeJSONObjectParse,
+  UnprocessableEntityResponse,
+} from './utils'
+
+async function logEventToClickHouse(bodyParts: string[], env: Env, ip?: string) {
+  const definition = safeJSONObjectParse<{ type: 'event' }>(bodyParts[1])
+  if (definition?.type !== 'event') return
+  const mapped = mapSentryEventToClickHouseEvent(bodyParts[2], ip)
+  await env.CLICKHOUSE_WRITE_QUEUE.send(mapped, {
+    contentType: 'json',
+  })
+  await insertSentryEventToClickHouse(env, bodyParts[2], ip)
+}
+
 export default {
-	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		try {
-			const SENTRY_INGEST_DOMAIN = env.SENTRY_INGEST_DOMAIN ?? "ingest.sentry.io";
-			const ALLOWED_DSN = (env.ALLOWED_DSN ?? "").split(",");
-			if(ALLOWED_DSN[0].length === 0){
-				ALLOWED_DSN.shift()
-			}
+  async queue(batch: MessageBatch, env: Env) {
+    const client = getClickhouseClient(env)
+    if (!client) return
 
-			const url = new URL(request.url);
+    await client.insert({
+      table: 'texts_events',
+      values: batch.messages,
+      clickhouse_settings: { date_time_input_format: 'best_effort' },
+      format: 'JSONEachRow',
+    })
+    batch.ackAll()
+  },
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const SENTRY_INGEST_DOMAIN = env.SENTRY_INGEST_DOMAIN ?? 'sentry.texts.com'
+    const url = new URL(request.url)
+    const ip = request.headers.get('CF-Connecting-IP')!
+    function proxy(body?: string) {
+      return fetch(`https://${SENTRY_INGEST_DOMAIN}${url.pathname}${url.search}`, {
+        method: request.method,
+        headers: {
+          ...request.headers,
+          'X-Forwarded-For': ip,
+        },
+        body,
+      })
+    }
+    try {
+      if (request.method !== 'POST') return await proxy()
+      const body = await request.text()
+      if (!body) return UnprocessableEntityResponse()
+      if (!url.pathname.endsWith('/envelope/')) return await proxy(body)
+      const projectId = extractProjectIDFromPathname(url.pathname)
+      if (projectId === null) return UnprocessableEntityResponse()
 
-			if(request.method === "GET"){
-				// js file will be last part
-				const file = url.pathname.split("/").pop();
-				const res = await fetch(`https://js.sentry-cdn.com/${file}`);
-				return res;
-			}
+      const bodyParts = body.split('\n')
+      const head = safeJSONObjectParse<{
+        event_id: string
+        sent_at: string
+        sdk: {
+          name: string
+          version: string
+        }
+      }>(bodyParts[0])
 
-			if (request.method === "POST") {
-				const body = await request.text();
-				if(!body) {
-					return new Response(JSON.stringify({success: false, code: 400, message: "Bad Request", error: "Invalid Request"}), {status: 400, headers: { 'Content-Type': 'application/json' }}); 
-				}
-				const head = JSON.parse(body.split("\n")[0])
-				
-				const dsn = new URL(head.dsn)
+      // send to clickhouse
+      ctx.waitUntil(logEventToClickHouse(bodyParts, env, ip))
 
-				if(!dsn.hostname.endsWith(SENTRY_INGEST_DOMAIN)) {
-					console.log(`Hostname does not end with SENTRY_INGEST_DOMAIN`)
-					return new Response(JSON.stringify({success: false, code: 422, message: "Unprocessable Entity", error: "Invalid DSN"}), {status: 422, headers: { 'Content-Type': 'application/json' }});
-				}
+      // proxy to sentry
+      ctx.waitUntil(proxy(body))
 
-				if(ALLOWED_DSN.length > 0 && !ALLOWED_DSN.includes(dsn.href)) {
-					console.log(`Strict mode is on and DSN is not in ALLOWED_DSN`)
-					return new Response(JSON.stringify({success: false, code: 422, message: "Unprocessable Entity", error: "Invalid DSN"}), {status: 422, headers: { 'Content-Type': 'application/json' }});
-				}
-				
-				const sentry_res = await fetch(`https://${dsn.hostname}/api${dsn.pathname}/envelope/`, { //the trailing slash is important
-					method: request.method,
-					headers: {
-						...request.headers,
-						"X-Forwarded-For": request.headers.get("CF-Connecting-IP")!
-					},
-					body: body
-				});
-
-				return sentry_res;
-
-			}
-
-			// sentry wouldnt make this request, so it's someone messing around
-			return new Response(JSON.stringify({success: false, code: 400, message: "Bad Request", error: "Invalid Request"}), {status: 400, headers: { 'Content-Type': 'application/json' }});
-
-		} catch (error) {
-			console.error(error)
-			return new Response(JSON.stringify({success: false, code: 500, message: "Internal Server Error", error: undefined}), {status: 500, headers: { 'Content-Type': 'application/json' }});
-		}
-
-		
-	},
-};
+      // don't wait, just respond back to the client
+      return new Response(JSON.stringify({
+        id: head?.event_id,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    } catch (error) {
+      console.error(error)
+      return InternalServerErrorResponse()
+    }
+  },
+}
