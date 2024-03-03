@@ -96,12 +96,12 @@ export function mapSentryEventToClickHouseEvent(event: any, ip?: string) {
     }))
   }
   const event_data: ClickHouseEventForSentry['event_data'] = {
+    _exceptions: exceptions.length > 0 ? exceptions : undefined,
+    _contexts: parsed?.contexts,
     _request: parsed?.request ?? undefined,
     _tags,
     _env: parsed?.environment,
     _platform: parsed?.platform,
-    _contexts: parsed?.contexts,
-    _exceptions: exceptions.length > 0 ? exceptions : undefined,
     ...restExtra,
   }
 

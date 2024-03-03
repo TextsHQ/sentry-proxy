@@ -2,9 +2,9 @@ import { batchInsertToClickHouse, queueEventToClickHouse, type ClickHouseMappedE
 import {
   extractProjectIDFromPathname,
   safeJSONObjectParse,
-  type InternalServerErrorResponse,
-  type UnprocessableEntityResponse,
-  // type BadRequestResponse,
+  InternalServerErrorResponse,
+  UnprocessableEntityResponse,
+  // BadRequestResponse,
 } from './utils'
 
 export default {
@@ -19,21 +19,21 @@ export default {
     const headers = new Headers(request.headers)
     if (ip) headers.set('X-Forwarded-For', ip)
     headers.set('X-Texts-Proxy', 'CFW') // CloudFlareWorker
-    function proxy(body?: string) {
-      return fetch(`https://${SENTRY_INGEST_DOMAIN}${url.pathname}${url.search}`, {
+    async function proxy(body: string | Response['body'] = request.body) {
+      const originURL = `https://${SENTRY_INGEST_DOMAIN}${url.pathname}${url.search}`
+      console.info('upstream request', request.method, url.pathname, url.search)
+      return fetch(originURL, {
         method: request.method,
-        headers,
-        body,
+        headers: request.headers,
+        body: request.method === 'POST' ? body : undefined,
       })
     }
     try {
       if (request.method !== 'POST') return await proxy()
       const contentType = request.headers.get('Content-Type')
-      const isFormPost = contentType?.includes('application/x-www-form-urlencoded')
-      if (isFormPost) return await proxy() // probably a "session" ping
+      if (contentType?.toLocaleLowerCase().includes('x-www-form-urlencoded')) return await proxy() // probably a "session" ping
       const body = await request.text()
-      if (!body) return UnprocessableEntityResponse()
-      if (!url.pathname.endsWith('/envelope/')) return await proxy(body)
+      if (!body || !url.pathname.endsWith('/envelope/')) return await proxy(body)
       const projectId = extractProjectIDFromPathname(url.pathname)
       if (projectId === null) return UnprocessableEntityResponse()
 
@@ -54,9 +54,10 @@ export default {
       ctx.waitUntil(proxy(body))
 
       // don't wait, just respond back to the client
-      return new Response(JSON.stringify({
-        id: head?.event_id,
-      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      return new Response(
+        JSON.stringify({ id: head?.event_id }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
     } catch (error) {
       console.error(error)
       return InternalServerErrorResponse()
