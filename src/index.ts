@@ -9,7 +9,7 @@ import {
 
 export default {
   async queue(batch: MessageBatch<ClickHouseMappedEvent>, env: Env) {
-    await batchInsertToClickHouse(batch.messages, env)
+    await batchInsertToClickHouse(batch.messages.map(evt => evt.body), env)
     batch.ackAll()
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

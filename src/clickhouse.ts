@@ -10,8 +10,8 @@ type ClickHouseCredentials = {
 export const getClickhouseClient = ({ CLICKHOUSE_HOST, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD }: ClickHouseCredentials) => {
   if (!CLICKHOUSE_HOST || !CLICKHOUSE_USER || !CLICKHOUSE_PASSWORD) return
   return createClient({
-    url: CLICKHOUSE_HOST,
-    user: CLICKHOUSE_USER,
+    host: CLICKHOUSE_HOST,
+    username: CLICKHOUSE_USER,
     password: CLICKHOUSE_PASSWORD,
   })
 }
@@ -39,22 +39,24 @@ type ClickHouseEventForSentry = {
   device_id?: string
 }
 
+type SentryExceptionFrame = {
+  function?: string
+  filename?: string
+  module?: string
+  lineno?: number
+  colno?: number
+  in_app?: boolean
+  pre_context?: string[]
+  context_line?: string
+  post_context?: string[]
+}
+
 type SentryException = {
   values: {
     type?: string
     value?: string
     stacktrace?: {
-      frames?: {
-        function?: string
-        filename?: string
-        module?: string
-        lineno?: number
-        colno?: number
-        in_app?: boolean
-        pre_context?: string[]
-        context_line?: string
-        post_context?: string[]
-      }[]
+      frames?: SentryExceptionFrame[]
     }
   }[]
 }
@@ -76,23 +78,22 @@ export function mapSentryEventToClickHouseEvent(event: any, ip?: string) {
   let exceptions: {
     type?: string
     value?: string
-    stacktrace?: string[]
+    stacktrace?: Pick<SentryExceptionFrame, 'function' | 'pre_context' | 'post_context'>[]
   }[] = []
   if (parsed?.exception?.values?.length) {
     exceptions = (parsed.exception as SentryException).values.map(exception => ({
       type: exception.type,
       value: exception.value,
-      stacktrace: exception.stacktrace?.frames?.map((frame: {
-        function?: string
-        filename?: string
-        module?: string
-        lineno?: number
-        colno?: number
-        in_app?: boolean
-        pre_context?: string[]
-        context_line?: string
-        post_context?: string[]
-      }) => frame.function).filter(Boolean) as string[],
+      stacktrace: exception.stacktrace?.frames?.map((frame: SentryExceptionFrame) => {
+        const pre_context = frame?.pre_context && frame.pre_context.length > 0 ? frame.pre_context : undefined
+        const post_context = frame?.post_context && frame.post_context.length > 0 ? frame.post_context : undefined
+        return {
+          function: frame.function,
+          context_line: frame.context_line,
+          pre_context,
+          post_context,
+        }
+      }),
     }))
   }
   const event_data: ClickHouseEventForSentry['event_data'] = {
@@ -148,16 +149,15 @@ export async function queueEventToClickHouse(bodyParts: string[], env: Env, ip?:
   })
 }
 
-export async function batchInsertToClickHouse(messages: MessageBatch<ClickHouseMappedEvent>['messages'], env: Env) {
+export async function batchInsertToClickHouse(values: ClickHouseMappedEvent[], env: Env) {
   const client = getClickhouseClient(env)
   if (!client) {
-    console.warn('ClickHouse client is not available, skipping batch insert:', messages)
+    console.warn('ClickHouse client is not available, skipping batch insert:', values)
     return
   }
-
   await client.insert({
     table: 'texts_events',
-    values: messages,
+    values,
     clickhouse_settings: { date_time_input_format: 'best_effort' },
     format: 'JSONEachRow',
   })

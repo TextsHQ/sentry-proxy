@@ -13,7 +13,6 @@ interface Env {
   //
   // Example binding to a Queue. Learn more at https://developers.cloudflare.com/queues/javascript-apis/
   SENTRY_INGEST_DOMAIN: string
-  ALLOWED_DSN: string
   CLICKHOUSE_HOST: string
   CLICKHOUSE_USER: string
   CLICKHOUSE_PASSWORD: string
