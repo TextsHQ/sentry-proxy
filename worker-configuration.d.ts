@@ -17,5 +17,5 @@ interface Env {
   CLICKHOUSE_HOST: string
   CLICKHOUSE_USER: string
   CLICKHOUSE_PASSWORD: string
-  CLICKHOUSE_WRITE_QUEUE: Queue
+  TEXTS_SENTRY_QUEUE: Queue<ClickHouseMappedEvent>
 }

@@ -2,6 +2,18 @@ name = "texts-sentry-proxy"
 main = "src/index.ts"
 compatibility_date = "2024-01-29"
 
+[[queues.producers]]
+queue = "texts-sentry-queue"
+binding = "TEXTS_SENTRY_QUEUE"
+
+[[queues.consumers]]
+queue = "texts-sentry-queue"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 10
+dead_letter_queue = "texts-sentry-dlq"
+max_concurrency = 5
+
 # modify the following to match your environment
 [vars]
 ALLOWED_DSN = ""

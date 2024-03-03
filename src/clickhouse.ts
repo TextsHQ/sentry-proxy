@@ -7,13 +7,14 @@ type ClickHouseCredentials = {
   CLICKHOUSE_PASSWORD: string
 }
 
-export const getClickhouseClient = ({ CLICKHOUSE_HOST, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD }: ClickHouseCredentials) => createClient({
-  host: CLICKHOUSE_HOST,
-  username: CLICKHOUSE_USER,
-  password: CLICKHOUSE_PASSWORD,
-  request_timeout: 60_000, // ms, defaults to 30_000
-  max_open_connections: 10, // defaults to Infinity
-})
+export const getClickhouseClient = ({ CLICKHOUSE_HOST, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD }: ClickHouseCredentials) => {
+  if (!CLICKHOUSE_HOST || !CLICKHOUSE_USER || !CLICKHOUSE_PASSWORD) return
+  return createClient({
+    url: CLICKHOUSE_HOST,
+    user: CLICKHOUSE_USER,
+    password: CLICKHOUSE_PASSWORD,
+  })
+}
 
 type ClickhouseGrafanaErrorLevel = 'critical' | 'error' | 'warning' | 'info' | 'debug' | 'trace' | 'unknown'
 
@@ -38,6 +39,31 @@ type ClickHouseEventForSentry = {
   device_id?: string
 }
 
+type SentryException = {
+  values: {
+    type?: string
+    value?: string
+    stacktrace?: {
+      frames?: {
+        function?: string
+        filename?: string
+        module?: string
+        lineno?: number
+        colno?: number
+        in_app?: boolean
+        pre_context?: string[]
+        context_line?: string
+        post_context?: string[]
+      }[]
+    }
+  }[]
+}
+
+function truncateString(str: string, length = 300) {
+  const trimmed = str.trim()
+  return trimmed.length > length ? `${trimmed.slice(0, length)}...` : trimmed
+}
+
 export function mapSentryEventToClickHouseEvent(event: any, ip?: string) {
   const parsed = safeJSONObjectParse<any>(event)
   const message = parsed?.message as string
@@ -47,10 +73,35 @@ export function mapSentryEventToClickHouseEvent(event: any, ip?: string) {
   const release = parsed?.release as string
   const extra = (parsed?.extra || {}) as Record<string, string>
   const { platformName, ...restExtra } = extra
-
+  let exceptions: {
+    type?: string
+    value?: string
+    stacktrace?: string[]
+  }[] = []
+  if (parsed?.exception?.values?.length) {
+    exceptions = (parsed.exception as SentryException).values.map(exception => ({
+      type: exception.type,
+      value: exception.value,
+      stacktrace: exception.stacktrace?.frames?.map((frame: {
+        function?: string
+        filename?: string
+        module?: string
+        lineno?: number
+        colno?: number
+        in_app?: boolean
+        pre_context?: string[]
+        context_line?: string
+        post_context?: string[]
+      }) => frame.function).filter(Boolean) as string[],
+    }))
+  }
   const event_data: ClickHouseEventForSentry['event_data'] = {
-    _request: { ...(parsed?.request || {}) },
+    _request: parsed?.request ?? undefined,
     _tags,
+    _env: parsed?.environment,
+    _platform: parsed?.platform,
+    _contexts: parsed?.contexts,
+    _exceptions: exceptions.length > 0 ? exceptions : undefined,
     ...restExtra,
   }
 
@@ -61,13 +112,53 @@ export function mapSentryEventToClickHouseEvent(event: any, ip?: string) {
     ip,
   }
 
+  const exceptionMessages = exceptions.map(
+    exception => `${exception.type}: ${exception.value}`,
+  )
+
+  const event_type = `sentry-${exceptions.length > 0
+    ? (exceptions.length > 1 ? 'exception-multi' : 'exception') : 'event'}`
+
+  const log_message = [
+    event_type,
+    release,
+    platformName,
+    truncateString([message, ...exceptionMessages].filter(Boolean).join(' | ')),
+  ].filter(Boolean).join(' | ')
+
   return {
     created_at: created_at || new Date(),
-    log_level: parsed?.level, // @TODO: check if this is a valid grafana log level
-    log_message: ['sentry', release, platformName, message, `Device ID: ${device_id}`].filter(Boolean).join(' | '),
-    event_type: 'sentry-event',
+    log_level: exceptionMessages.length > 0 ? 'error' : (parsed?.level || 'info'),
+    log_message,
+    event_type,
     event_data: JSON.stringify(event_data),
     metadata: JSON.stringify(metadata),
     device_id,
   } as const
+}
+
+export type ClickHouseMappedEvent = ReturnType<typeof mapSentryEventToClickHouseEvent>
+
+export async function queueEventToClickHouse(bodyParts: string[], env: Env, ip?: string) {
+  const definition = safeJSONObjectParse<{ type: 'event' }>(bodyParts[1])
+  if (definition?.type !== 'event') return
+  const mapped = mapSentryEventToClickHouseEvent(bodyParts[2], ip)
+  await env.TEXTS_SENTRY_QUEUE.send(mapped, {
+    contentType: 'json',
+  })
+}
+
+export async function batchInsertToClickHouse(messages: MessageBatch<ClickHouseMappedEvent>['messages'], env: Env) {
+  const client = getClickhouseClient(env)
+  if (!client) {
+    console.warn('ClickHouse client is not available, skipping batch insert:', messages)
+    return
+  }
+
+  await client.insert({
+    table: 'texts_events',
+    values: messages,
+    clickhouse_settings: { date_time_input_format: 'best_effort' },
+    format: 'JSONEachRow',
+  })
 }
