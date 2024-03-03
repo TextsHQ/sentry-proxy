@@ -13,14 +13,13 @@ export default {
     batch.ackAll()
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const SENTRY_INGEST_DOMAIN = env.SENTRY_INGEST_DOMAIN ?? 'sentry.texts.com'
     const url = new URL(request.url)
     const ip = request.headers.get('CF-Connecting-IP')! || request.headers.get('X-Forwarded-For')?.split(',')[0]
     const headers = new Headers(request.headers)
     if (ip) headers.set('X-Forwarded-For', ip)
     headers.set('X-Texts-Proxy', 'CFW') // CloudFlareWorker
     async function proxy(body: string | Response['body'] = request.body) {
-      const originURL = `https://${SENTRY_INGEST_DOMAIN}${url.pathname}${url.search}`
+      const originURL = `https://${env.SENTRY_INGEST_DOMAIN}${url.pathname}${url.search}`
       console.info('upstream request', request.method, url.pathname, url.search)
       return fetch(originURL, {
         method: request.method,

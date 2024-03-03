@@ -16,7 +16,7 @@ max_concurrency = 5
 
 # modify the following to match your environment
 [vars]
-SENTRY_INGEST_DOMAIN = "sentry.texts.com"
+SENTRY_INGEST_DOMAIN = "sentry-origin.texts.com"
 CLICKHOUSE_HOST = ""
 CLICKHOUSE_USER = "clickhouse"
 CLICKHOUSE_PASSWORD = ""
